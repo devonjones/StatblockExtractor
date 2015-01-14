@@ -1,0 +1,199 @@
+#!/usr/bin/env python
+import optparse
+import sys
+import os
+import sh
+import os.path
+from statblock.filters import *
+from statblock.checks import *
+from statblock.parse.statistics import parse_statistics, parse_gear
+from statblock.parse.offense import parse_offense
+from statblock.parse.defense import parse_defense
+from statblock.parse.tactics import parse_tactics
+from statblock.parse.special_abilities import parse_special_abilities
+from statblock.parse.basics import parse_basics
+from statblock.parse.utils import yield_statblocks, create
+from statblock.utils import filter_path_element
+
+def extract():
+	lines = sys.stdin.readlines()
+	lines = form_feed_filter(lines)
+	lines = counter_filter(lines)
+	lines = page_split_filter(lines)
+	lines = sidebar_filter(lines)
+	lines = location_filter(lines)
+	lines = xp_filter(lines)
+	lines = title_filter(lines)
+	lines = int_filter(lines)
+	lines = pageend_filter(lines)
+	lines = collapse_filter(lines)
+	required_check(lines)
+	lines = parse_offense(lines)
+	lines = parse_defense(lines)
+	lines = parse_statistics(lines)
+	lines = parse_gear(lines)
+	lines = parse_tactics(lines)
+	lines = parse_special_abilities(lines)
+	lines = parse_basics(lines)
+	lines = final_checks(lines)
+	return lines
+
+def final_checks(lines):
+	retlines = []
+	for statblock in yield_statblocks(lines, retlines):
+		source = statblock.setdefault("source", {"lines": []})
+		if len(source.get("lines", [])) > 0:
+			raise Exception(
+				"Statblock has unparsed lines: %s" % source["lines"])
+		else:
+			if source.has_key("lines"):
+				del source["lines"]
+			del statblock["source"]
+		if statblock.has_key("CR"):
+			basics = statblock.setdefault("basics", {})
+			basics["cr"] = statblock["CR"]
+			del statblock["CR"]
+		if statblock.has_key("HP"):
+			defense = statblock.setdefault("defense", {})
+			value = statblock["HP"]
+			value = int(value.lower().replace("each", ""))
+			hp = defense.setdefault("hit_points", create("hit_points"))
+			if hp.get("value") == None:
+				hp["value"] = value
+			elif value != hp.get("value"):
+				raise Exception(
+					"Hit points do not match %s != %s" % (
+						value, hp.get("value")))
+			del statblock["HP"]
+		if statblock.has_key("XP"):
+			xp = statblock["XP"]
+			xp = xp.replace(",", "").replace("each", "")
+			basics = statblock.setdefault("basics", {})
+			basics["xp"] = int(xp)
+			del statblock["XP"]
+	return retlines
+
+def save_data(directory, module_path, lines):
+	real_dir = os.path.abspath(os.path.expanduser(directory))
+	if os.path.exists(real_dir):
+		mpath = real_dir + "/" + module_path
+		if os.path.exists(mpath):
+			sh.rm("-rf", mpath)
+		sh.mkdir("-p", mpath)
+		with open("%s/%s" % (mpath, "output.txt"), "w") as dfile:
+			for line in lines:
+				dfile.write(line)
+		spath = "%s/%s" % (mpath, "statblocks")
+		if os.path.exists(spath):
+			sh.rm("-rf", spath)
+		os.mkdir(spath)
+		for statblock in yield_statblocks(lines, []):
+			context = statblock.get("context")
+			path = spath
+			if context:
+				part = context.get("part", {})
+				event = context.get("event", {})
+				if part.get("name").lower() == "bestiary":
+					path = path + "/bestiary"
+				else:
+					pp = assemble_path_chunk(part)
+					if pp:
+						path = path + "/" + pp
+					else:
+						path = path + "/_"
+					ep = assemble_path_chunk(event)
+					if pp:
+						path = path + "/" + ep
+					else:
+						path = path + "/_"
+			sh.mkdir("-p", path)
+			name = statblock["name"]
+			name = filter_path_element(name)
+			fname = "%s/%s.json" % (path, name)
+			counter = 1
+			while os.path.exists(fname):
+				fname = "%s/%s_%s.json" % (path, name, counter)
+				counter += 1
+			with open(fname, "w") as jfile:
+				json.dump(statblock, jfile, indent=2)
+	else:
+		sys.stderr.write("%s does not exist\n" % directory)
+		sys.exit(1)
+
+def assemble_path_chunk(chunk):
+	chunk_pieces = []
+	if chunk.has_key("symbol"):
+		chunk_pieces.append(chunk["symbol"].lower())
+	if chunk.has_key("name"):
+		chunk_pieces.append(chunk["name"].lower())
+	if len(chunk_pieces) > 0:
+		parts = "_".join(chunk_pieces)
+		parts = filter_path_element(parts)
+		return parts
+
+def create_module_path(opts):
+	module_path = None
+	if opts.ap:
+		if opts.ap_num:
+			module_path = filter_path_element("%s_%s" % (opts.ap_num, opts.ap))
+		else:
+			raise Exception("-a requires -A")
+	if opts.module:
+		if opts.ap:
+			if opts.module_num:
+				module_path += "/" + filter_path_element(
+					"%s_%s" % (opts.module_num, opts.module))
+			else:
+				raise Exception("-a requires -M")
+		else:
+			if opts.module_num:
+				module_path += filter_path_element(
+					"%s_%s" % (opts.module_num, opts.module))
+			else:
+				module_path += filter_path_element(opts.module)
+	return module_path
+
+def option_parser():
+	usage = "usage: %prog <number>"
+	usage += "\n\nParses out statblocks from a paizo pdf"
+	parser = optparse.OptionParser(usage=usage)
+	parser.add_option(
+		"-o", "--output", dest="output",
+		help="Output data directory.")
+	parser.add_option(
+		"-a", "--ap", dest="ap",
+		help="Adventure path")
+	parser.add_option(
+		"-A", "--ap-num", dest="ap_num",
+		help="Adventure path number")
+	parser.add_option(
+		"-m", "--module", dest="module",
+		help="Module")
+	parser.add_option(
+		"-M", "--module-num", dest="module_num",
+		help="Module number/symbol")
+	return parser
+
+def main():
+	parser = option_parser()
+	(opts, args) = parser.parse_args()
+	lines = extract()
+	if opts.output:
+		if not os.path.exists(opts.output):
+			sys.stderr.write("-o/--output points to a directory that does not exist")
+			sys.exit(1)
+		if not os.path.isdir(opts.output):
+			sys.stderr.write("-o/--output points to a file, it must point to a directory")
+			sys.exit(1)
+		module_path = create_module_path(opts)
+		if module_path:
+			save_data(opts.output, module_path , lines)
+		else:
+			raise Exception("-d requires at least one of -a or -m")
+	else:
+		data = format_check(lines)
+		print "".join(data)
+
+if __name__ == "__main__":
+	main()
+

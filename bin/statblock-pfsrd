@@ -1,0 +1,206 @@
+#!/usr/bin/env python
+import optparse
+import sys
+import os
+import sh
+import json
+import os.path
+from statblock.checks import format_check
+from statblock.filters import unicode_filter
+from statblock.parse.statistics import parse_statistics
+from statblock.parse.offense import parse_offense
+from statblock.parse.defense import parse_defense
+from statblock.parse.basics import parse_basics
+from statblock.parse.tactics import parse_tactics
+from statblock.parse.special_abilities import parse_special_abilities
+from statblock.utils import filter_path_element, filter_mdash, filter_none
+from psrd.sql import fetch_immediate_subordinantes, find_section, get_db_connection
+from psrd.sql.creatures import fetch_creature_detail, fetch_creature_spells
+from BeautifulSoup import BeautifulSoup, Tag
+
+def dump_creatures(conn, opts):
+	curs = conn.cursor()
+	find_section(curs, type="creature")
+	creatures = curs.fetchall()
+	lines = []
+	for creature in creatures:
+		print creature["name"]
+		statblock = dump_creature(conn, opts, creature)
+		lines.append(json.dumps(statblock))
+
+	# {"saves": {"lines": ["Fort +1, Ref +6, Will +3; +1 vs. fear and charm\n"]}, "hp": {"lines": ["9 (1d8+1)\n"]}}
+	#lines = parse_senses(lines)
+	#lines = parse_tactics(lines)
+	#lines = parse_special_abilities(lines)
+	#lines = parse_alignment(lines)
+	#lines = parse_lines(lines)
+	#lines = final_checks(lines)
+	#print "".join(format_check(lines))
+
+def create_field(data):
+	return {"lines": [filter_unicode(data)]}
+	#return {"lines": [unicode_filter(data)]}
+
+def dump_creature(conn, opts, creature):
+	curs = conn.cursor()
+	fetch_creature_detail(curs, creature['section_id'])
+	creature_details = curs.fetchone()
+
+	fetch_creature_spells(curs, creature['section_id'])
+	creature_spells = curs.fetchall()
+	statblock = {"source": {}, "tag": "statblock"}
+	statblock["book"] = creature["source"]
+	handle_offense(statblock, creature_details, creature_spells)
+	handle_defense(statblock, creature_details)
+	handle_statistics(statblock, creature_details)
+	lines = parse_offense([json.dumps(statblock)])
+	lines = parse_defense(lines)
+	lines = parse_statistics(lines)
+	print "".join(format_check(lines))
+	return statblock
+
+def format_number(number):
+	if number > 0:
+		return "+%s" % number
+	else:
+		return "%s" % number
+
+def filter_unicode(text):
+	text = unicode(text).replace(u"\u2013", "-")
+	text = unicode(text).replace(u"\u2014", "-")
+	text = unicode(text).replace(u"&amp;", "&")
+	return text
+
+def handle_offense(statblock, creature_details, creature_spells):
+	offense = statblock["source"].setdefault("offense", {})
+	if creature_details["melee"]:
+		offense["melee"] = create_field(creature_details["melee"])
+	if creature_details["ranged"]:
+		offense["ranged"] = create_field(creature_details["ranged"])
+	if creature_details["speed"]:
+		offense["speed"] = create_field(creature_details["speed"])
+	if creature_details["space"]:
+		space = creature_details["space"]
+		if creature_details["reach"]:
+			space = space + "; Reach %s" % creature_details["reach"]
+		offense["space"] = create_field(space)
+	if creature_details["special_attacks"]:
+		offense["special attacks"] = create_field(
+			creature_details["special_attacks"])
+	if len(creature_spells) > 0:
+		_handle_spells(offense, creature_spells)
+	return statblock
+
+def _handle_spells(statblock, creature_spells):
+	for spells in creature_spells:
+		soup = BeautifulSoup(spells["body"])
+		text = []
+		for item in soup.contents:
+			if type(item) == Tag:
+				text.append("".join(item.findAll(text=True)))
+			else:
+				text.append(unicode(item))
+		statblock[spells["name"]] = {"lines": [filter_unicode(t) for t in text]}
+
+def handle_defense(statblock, creature_details):
+	defense = statblock["source"].setdefault("defense", {})
+	if creature_details["ac"]:
+		defense["ac"] = create_field(creature_details["ac"])
+	if creature_details["fortitude"]:
+		saves = "Fort %s, Ref %s, Will %s" % (
+			creature_details["fortitude"],
+			creature_details["reflex"],
+			creature_details["will"])
+		defense["saves"] = create_field(saves)
+	if creature_details["hp"]:
+		defense["hp"] = create_field(creature_details["hp"])
+		create_defenses(defense, creature_details)
+	if creature_details["weaknesses"]:
+		defense["weaknesses"] = create_field(creature_details["weaknesses"])
+	return statblock
+
+def create_defenses(defense, creature_details):
+	defenses = []
+	if creature_details.has_key("defensive_abilities"):
+		defenses.append(
+			"Defensive Abilities %s" % creature_details["defensive_abilities"])
+	if creature_details["dr"]:
+		defenses.append("DR %s" % creature_details["dr"])
+	if creature_details["sr"]:
+		defenses.append("SR %s" % creature_details["sr"])
+	if creature_details["resist"]:
+		defenses.append("Resist %s" % creature_details["resist"])
+	if creature_details["immune"]:
+		defenses.append("Immune %s" % creature_details["immune"])
+	if len(defenses) > 0:
+		defense["defenses"] = create_field("; ".join(defenses))
+
+def handle_statistics(statblock, creature_details):
+	statistics = statblock["source"].setdefault("statistics", {})
+	if creature_details["gear"]:
+		statistics["gear"] = create_field(creature_details["gear"])
+	if creature_details["combat_gear"]:
+		statistics["combat gear"] = create_field(
+			creature_details["combat_gear"])
+	if creature_details["other_gear"]:
+		statistics["other gear"] = create_field(creature_details["other_gear"])
+	if creature_details["skills"]:
+		statistics["skills"] = create_field(creature_details["skills"])
+	if creature_details["feats"]:
+		statistics["feats"] = create_field(creature_details["feats"])
+	if creature_details["special_qualities"]:
+		statistics["sq"] = create_field(creature_details["special_qualities"])
+	if creature_details["languages"]:
+		statistics["languages"] = create_field(creature_details["languages"])
+	if creature_details["base_attack"]:
+		attack = "Base Atk %s; CMB %s; CMD %s" % (
+			creature_details["base_attack"],
+			filter_mdash(filter_none(creature_details["cmb"])),
+			filter_mdash(filter_none(creature_details["cmd"])))
+		statistics["attack"] = create_field(attack)
+	if creature_details["strength"]:
+		attrs = "Str %s, Dex %s, Con %s, Int %s, Wis %s, Cha %s" %(
+			filter_mdash(filter_none(creature_details["strength"])),
+			filter_mdash(filter_none(creature_details["dexterity"])),
+			filter_mdash(filter_none(creature_details["constitution"])),
+			filter_mdash(filter_none(creature_details["intelligence"])),
+			filter_mdash(filter_none(creature_details["wisdom"])),
+			filter_mdash(filter_none(creature_details["charisma"])))
+		statistics["attributes"] = create_field(attrs)
+	return statblock
+
+def option_parser():
+	usage = "usage: %prog <number>"
+	usage += "\n\nParses out statblocks from a paizo pdf"
+	parser = optparse.OptionParser(usage=usage)
+	parser.add_option(
+		"-o", "--output", dest="output",
+		help="Output data directory. (required)")
+	parser.add_option(
+		"-d", "--db", dest="db",
+		help="Sqlite DB to load into (required)")
+	return parser
+
+def main():
+	parser = option_parser()
+	(opts, args) = parser.parse_args()
+	if not opts.db:
+		sys.stderr.write("-d/--db required")
+		sys.exit(1)
+	if not opts.output:
+		sys.stderr.write("-o/--output required")
+		sys.exit(1)
+	if not os.path.exists(opts.output):
+		sys.stderr.write(
+			"-o/--output points to a directory that does not exist")
+		sys.exit(1)
+	if not os.path.isdir(opts.output):
+		sys.stderr.write(
+			"-o/--output points to a file, it must point to a directory")
+		sys.exit(1)
+	conn = get_db_connection(opts.db)
+	dump_creatures(conn, opts)
+
+if __name__ == "__main__":
+	main()
+
