@@ -43,6 +43,8 @@ def _get_offense_handler(token):
 		return _handle_spells
 	elif token.find("spells prepared") > -1:
 		return _handle_spells
+	elif token.find("extracts prepared") > -1:
+		return _handle_spells
 	elif token.find("spell-like abilities") > -1:
 		return _handle_spells
 	elif token.find("spell-like ability") > -1:

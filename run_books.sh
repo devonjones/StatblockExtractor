@@ -7,6 +7,7 @@ set -e
 ./bin/statblock-pfsrd -o ../data/ -d ../../PathfinderOpenReference/pfsrd-data/book-gmg.db
 ./bin/statblock-pfsrd -o ../data/ -d ../../PathfinderOpenReference/pfsrd-data/book-ma.db
 ./bin/statblock-pfsrd -o ../data/ -d ../../PathfinderOpenReference/pfsrd-data/book-npc.db
+./bin/statblock-pfsrd -o ../data/ -d ../../PathfinderOpenReference/pfsrd-data/book-mc.db
 ./bin/statblock-pfsrd -o ../data/ -d ../../PathfinderOpenReference/pfsrd-data/book-tech.db
 ./bin/statblock-pfsrd -o ../data/ -d ../../PathfinderOpenReference/pfsrd-data/book-um.db
 

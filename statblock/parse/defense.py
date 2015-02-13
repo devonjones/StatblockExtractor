@@ -221,11 +221,12 @@ def _handle_defensive_abilities(statblock, data):
 			da_s["name"] = create("defensive_ability", name=ability)
 
 def _handle_dr(statblock, data):
-	dr = data[3:]
-	value, overcome = dr.split("/")
-	dr_section = statblock.setdefault("damage_reduction", [])
-	dr_section.append(create(
-		"damage_reduction", value=int(value), overcome=overcome))
+	drs = [s.strip() for s in data[3:].split(', DR')]
+	for dr in drs:
+		value, overcome = dr.split("/")
+		dr_section = statblock.setdefault("damage_reduction", [])
+		dr_section.append(create(
+			"damage_reduction", value=int(value), overcome=overcome))
 
 def _handle_resist(statblock, data):
 	resists = [s.strip() for s in split(data[7:])]
